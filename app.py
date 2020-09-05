@@ -1,6 +1,7 @@
 from flask import Flask
 import requests
 import json
+import os
 
 app = Flask(__name__)
 
@@ -45,20 +46,62 @@ class Package:
         string version - package's version or tag
         Package list deps - package's dependencies
     Class members:
-        dictionary CACHE - Holds cache of all packages.
+        dictionary CACHE - Holds data of all packages: set of package name and version to a list of it's dependencies.
     """
-    CACHE = {}  # {package_name+package_version : package_class_instance}
+    CACHE = None  # {("package_name","package_version") : [("package_name","package_version")...]}
 
     def __init__(self, name, version):
         """
         :param name: Package's name
         :param version: Package's version/tag
         """
+        Package._init_cache()
         self.name = name
         self.version = str(version)
         self.deps = None
-        Package.CACHE[self.name + self.version] = self  # Add package to cache
         self.discover_deps()
+        Package.CACHE[(self.name, self.version)] = self.deps  # Add package to cache
+
+    @classmethod
+    def _init_cache(cls):
+        """
+        Either create or load cache json file to CACHE class member
+        """
+        if cls.CACHE is not None:
+            return
+        try:
+            with open("cache.json") as f:
+                # Load the cache file to a dictionary class member
+                # json: [{"name":"package_name", "version":"1.0", "deps":[("a","1.0")...]}...]
+                # CACHE: {("package_name","package_version") : [("package_name","package_version")...]}
+                cache = json.load(f)
+                cls.CACHE = {}
+                for item in cache:
+                    # json converts tuples to lists so the dependency list needs to be converted back
+                    deps = [(i[0], i[1]) for i in item["deps"]]
+                    # Add to class member cache
+                    cls.CACHE[(item["name"], item["version"])] = deps
+
+        except FileNotFoundError:
+            cls.CACHE = {}
+        except json.JSONDecodeError:
+            cls.CACHE = {}
+            # cache json is bad, remove it
+            os.remove("cache.json")
+
+    @classmethod
+    def update_cache(cls):
+        """
+        Update cache json file using CACHE class member
+        """
+        with open("cache.json", 'w') as f:
+            cache = []
+            # Write the cache dictionary to a json file:
+            # json: [{"name":"package_name", "version":"1.0", "deps":[("a","1.0")...]}...]
+            # CACHE: {("package_name","package_version") : [("package_name","package_version")...]}
+            for pkg_name, pkg_deps in cls.CACHE.items():
+                cache.append({"name": pkg_name[0], "version": pkg_name[1], "deps": pkg_deps})
+            json.dump(cache, f)
 
     def add_dependencies(self, dependencies):
         """
@@ -68,15 +111,13 @@ class Package:
         for name, ver in dependencies.items():
             # Get the version number
             ver = translate_version_syntax(ver)
-            pkg_name = name + ver
+            pkg_name = (name, ver)
 
-            # Either get the package instance from the cache or create a new one
+            # Create a new Package if dependency is not in the cache so that dependency discovering continues
             if pkg_name not in Package.CACHE:
-                pkg = Package(name, ver)
-            else:
-                pkg = Package.CACHE[pkg_name]
+                Package(name, ver)
             # Add Package instance to the dependencies list
-            self.deps.append(pkg)
+            self.deps.append(pkg_name)
 
     def discover_deps(self):
         """
@@ -98,39 +139,39 @@ class Package:
             self.add_dependencies(pkg_info['devDependencies'])
 
 
-def print_tree(pkg, printed_pkgs, dash_num):
-    dash = '-' * dash_num
-    print(f"{dash}{pkg.name}({pkg.version})")
+def get_tree(pkg, printed_pkgs, dash_num, tree, CACHE):
+    """
+    Create dependency tree.
+    :param pkg: (pkg_name, pkg_version) of the package to check dependencies for
+    :param printed_pkgs: a list containing all packages that have been checked already, used to avoid loops
+    :param dash_num: number of dashes needed to be drawn (also the package's depth in the tree)
+    :param tree: string of the tree so far
+    :param CACHE: holds data on all packages and dependencies
+    :return:
+    """
+    dash = '─' * dash_num
+    tree += f"│{dash}{pkg[0]}({pkg[1]})<br/>"
     printed_pkgs.append(pkg)
 
-    if pkg.deps:
-        for dep in pkg.deps:
-            if dep not in printed_pkgs:
-                printed_pkgs = print_tree(dep, printed_pkgs, dash_num + 1)
+    if CACHE[pkg]:  # Are there any dependencies?
+        for dep in CACHE[pkg]:
+            if dep not in printed_pkgs:  # To avoid loops
+                tree, printed_pkgs = get_tree(dep, printed_pkgs, dash_num + 1, tree, CACHE)
 
-    return printed_pkgs
+    return tree, printed_pkgs
 
 
-#
-# Gets a string package name and a version string.
-#
 @app.route('/<pkg_name>/<version>')
 def present_dependencies(pkg_name, version):
+    # Create package, get dependencies during creation and update cache
     pkg = Package(pkg_name, version)
+    pkg.update_cache()
+
+    # Create tree
     print("done. Starting tree!")
-    print_tree(pkg, [], 0)
+    tree = get_tree((pkg.name, pkg.version), [], 0, f"Dependency Tree for {pkg_name}({version}):<br/><br/>", Package.CACHE)
     print("end of tree!")
-
-
-    # print("\nPrinting dependencies:\n")
-    # for dep in pkg.deps:
-    #     print(dep.name + " " + pkg.version)
-    # print("\nPrinting Cache:\n")
-    # for name, instance in pkg.CACHE.items():
-    #     print(name)
-    #     print(instance.name)
-    #     print(instance.version)
-    return 'OK'
+    return tree[0]
 
 
 if __name__ == '__main__':
