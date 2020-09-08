@@ -19,7 +19,10 @@ def translate_version_syntax(version):
 
     # Handle cases where a space appears
     version = version.split()
-    version = version[0]
+    try:
+        version = version[0]
+    except IndexError:
+        print(f"BUG: version number: {version}")
 
     # Extend version number (for instance, 1.1 would be extended to 1.1.0)
     if len(version.split('.')) < 3:
@@ -52,15 +55,19 @@ class Package:
     """
     CACHE = None  # {("package_name","package_version") : [("package_name","package_version")...]}
 
-    def __init__(self, name, version):
+    def __init__(self, name, version, scope=None):
         """
         :param name: Package's name
         :param version: Package's version/tag
         """
         Package._init_cache()
-        self.name = name
+        if scope is not None:
+            self.name = scope + "/" + name
+        else:
+            self.name = name
         self.version = version
         self.deps = None
+        self.error = None
         self.discover_deps()
 
     @classmethod
@@ -111,7 +118,10 @@ class Package:
         """
         for name, ver in dependencies.items():
             # Get the version number
-            ver = translate_version_syntax(ver)
+            if ver:  # In some cases, version number is ""
+                ver = translate_version_syntax(ver)
+            else:
+                ver = "0.0.0"
             pkg_id = (name, ver)
 
             # Create a new Package if dependency is not in the cache so that dependency discovering continues
@@ -135,6 +145,9 @@ class Package:
 
         response = requests.get(f"https://registry.npmjs.org/{self.name}/{self.version}")
         pkg_info = response.json()
+
+        if pkg_info == "Not Found" or response.status_code == 404:
+            self.error = f"Package not found. Package name:{self.name}, Package version: {self.version}"
 
         # Dependencies appear in json under 'dependencies' OR under 'devDependencies'
         if 'dependencies' in pkg_info:
@@ -172,6 +185,22 @@ def present_dependencies(pkg_name, version):
     # Create package, get dependencies during creation and update cache
     pkg = Package(pkg_name, version)
 
+    if pkg.error is not None:
+        return pkg.error
+
+    # update the cache with the resolved deps
+    pkg.update_cache()
+
+    # Create tree
+    tree, _ = get_tree((pkg.name, pkg.version), f"Dependency Tree for {pkg_name}({version}):<br/><br/>")
+    return tree
+
+
+@app.route('/<scope>/<pkg_name>/<version>')
+def present_scope_dependencies(scope, pkg_name, version):
+    # Create package, get dependencies during creation and update cache
+    pkg = Package(pkg_name, version, scope)
+
     # update the cache with the resolved deps
     pkg.update_cache()
 
@@ -201,7 +230,7 @@ def test_dependencies():
 @app.route('/test/nodeps')
 def test_no_dependencies():
     """
-    Check if the program operates correctly with a package without dependencies.
+    Test if the program operates correctly with a package without dependencies.
     :return: test message
     """
     pkg = Package("inherits", "*")
